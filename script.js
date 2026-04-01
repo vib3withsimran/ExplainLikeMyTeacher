@@ -1,4 +1,6 @@
- document.getElementById("fileInput").addEventListener("change", function() {
+import { Client } from "https://cdn.jsdelivr.net/npm/@gradio/client/+esm";
+
+document.getElementById("fileInput").addEventListener("change", function() {
     const fileName = this.files[0] ? this.files[0].name : "No Video Selected";
     document.getElementById("fileName").innerText = fileName;
 }); 
@@ -22,33 +24,34 @@ function speakText(text) {
         window.speechSynthesis.speak(speech);
     }
 }  
+
 async function sendData() {
     document.getElementById("result").innerText = "Generating answer...";
 
     const file = document.getElementById("fileInput").files[0];
     const question = document.getElementById("question").value;
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("question", question);
-
     try {
-        const response = await fetch("https://splittable-terrence-unwooded.ngrok-free.dev/generate", {
-            method: "POST",
-            body: formData
+        const client = await Client.connect(
+            "ayushi18270/Explain-like-my-teacher"
+        );
+
+        const result = await client.predict("/run_pipeline", {
+            file: file,
+            question: question
         });
 
-        const data = await response.json();
-
-        const answerText = data.message;
+        const answerText = result.data[0];
 
         document.getElementById("result").innerText =
             "Answer: " + answerText;
 
-        // 🔊 THIS LINE IS NEW
         speakText(answerText.substring(0, 500));
 
     } catch (error) {
-        document.getElementById("result").innerText = "Error generating answer";
+        console.error(error);
+        document.getElementById("result").innerText =
+            "Error generating answer";
     }
 }
+window.sendData = sendData;
