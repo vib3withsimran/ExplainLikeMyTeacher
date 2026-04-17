@@ -8,7 +8,7 @@ export default function AuthScreen() {
   const Colors = useTheme();
 
   const handleSignIn = () => {
-    router.replace('/(tabs)');
+    router.replace('/(drawer)');
   };
 
   const styles = StyleSheet.create({

@@ -2,6 +2,7 @@ import { View, Text, StyleSheet, ScrollView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Fonts, Spacing, Radii, useTheme } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
+import Header from '@/components/Header';
 
 export default function HistoryScreen() {
   const Colors = useTheme();
@@ -89,14 +90,10 @@ export default function HistoryScreen() {
   });
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+      <Header title="History" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         
-        <View style={styles.header}>
-          <Text style={styles.title}>History</Text>
-          <Text style={styles.subtitle}>Review your learning sessions and uncompleted modules.</Text>
-        </View>
-
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Recent</Text>
           

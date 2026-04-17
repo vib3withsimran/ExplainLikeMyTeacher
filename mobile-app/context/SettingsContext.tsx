@@ -21,7 +21,7 @@ const defaultSettings: VoiceSettings = {
   audioEnabled: true,
   autoPlayAudio: true,
   playbackSpeed: 1,
-  outputLanguage: 'en-US',
+  outputLanguage: 'english',
   voiceSelection: 'Default',
 };
 

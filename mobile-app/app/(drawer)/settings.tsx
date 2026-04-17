@@ -1,15 +1,16 @@
-import { View, Text, StyleSheet, ScrollView, Pressable, Switch, Platform, Image } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, Switch, Platform, Image, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Fonts, Spacing, Radii, useTheme } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useThemeContext } from '@/context/ThemeContext';
 import { useSettings } from '@/context/SettingsContext';
 import { router } from 'expo-router';
+import Header from '@/components/Header';
 
 export default function ProfileScreen() {
   const Colors = useTheme();
   const { isDarkMode, toggleTheme } = useThemeContext();
-  const { voiceSettings, setAudioEnabled, setAutoPlayAudio, setPlaybackSpeed } = useSettings();
+  const { voiceSettings, setAudioEnabled, setAutoPlayAudio, setPlaybackSpeed, setOutputLanguage } = useSettings();
 
   const handleSignOut = () => {
     router.replace('/');
@@ -178,7 +179,8 @@ export default function ProfileScreen() {
   });
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+      <Header title="Settings" />
       <ScrollView style={styles.container} contentContainerStyle={styles.content}>
         
         {/* User Info */}
@@ -234,10 +236,20 @@ export default function ProfileScreen() {
 
           <View style={{ marginBottom: Spacing.lg }}>
             <Text style={[styles.settingLabel, { fontSize: 13, color: Colors.on_surface_variant }]}>Output Language</Text>
-            <Pressable style={styles.dropdownButton}>
-              <Text style={styles.dropdownText}>English (US)</Text>
-              <IconSymbol name="chevron.down" size={20} color={Colors.on_surface_variant} />
-            </Pressable>
+            <View style={styles.segmentedControl}>
+              <Pressable
+                style={[styles.segmentButton, voiceSettings.outputLanguage === 'english' && styles.segmentButtonActive]}
+                onPress={() => setOutputLanguage('english')}
+              >
+                <Text style={[styles.segmentText, voiceSettings.outputLanguage === 'english' && styles.segmentTextActive]}>English</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.segmentButton, voiceSettings.outputLanguage === 'hinglish' && styles.segmentButtonActive]}
+                onPress={() => setOutputLanguage('hinglish')}
+              >
+                <Text style={[styles.segmentText, voiceSettings.outputLanguage === 'hinglish' && styles.segmentTextActive]}>Hinglish</Text>
+              </Pressable>
+            </View>
           </View>
 
           <View style={{ marginBottom: Spacing.lg }}>
