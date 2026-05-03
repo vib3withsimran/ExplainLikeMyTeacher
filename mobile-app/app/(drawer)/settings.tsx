@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, Pressable, Switch, Platform, Image, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, Switch, Platform, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Fonts, Spacing, Radii, useTheme } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -6,14 +6,33 @@ import { useThemeContext } from '@/context/ThemeContext';
 import { useSettings } from '@/context/SettingsContext';
 import { router } from 'expo-router';
 import Header from '@/components/Header';
+import { useEffect, useState } from 'react';
+import { supabase } from '@/services/supabaseClient';
 
 export default function ProfileScreen() {
   const Colors = useTheme();
   const { isDarkMode, toggleTheme } = useThemeContext();
   const { voiceSettings, setAudioEnabled, setAutoPlayAudio, setPlaybackSpeed, setOutputLanguage } = useSettings();
+  const [userEmail, setUserEmail] = useState<string>('');
 
-  const handleSignOut = () => {
-    router.replace('/');
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      setUserEmail(data.user?.email ?? '');
+    });
+  }, []);
+
+  const handleSignOut = async () => {
+    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Sign Out',
+        style: 'destructive',
+        onPress: async () => {
+          await supabase.auth.signOut();
+          router.replace('/auth/login');
+        },
+      },
+    ]);
   };
 
   const styles = StyleSheet.create({
@@ -191,8 +210,8 @@ export default function ProfileScreen() {
               <IconSymbol name="pencil" size={14} color={Colors.on_primary} />
             </View>
           </View>
-          <Text style={styles.userName}>Alex Johnson</Text>
-          <Text style={styles.userEmail}>alex.j@example.com</Text>
+          <Text style={styles.userName}>{userEmail.split('@')[0] || 'Student'}</Text>
+          <Text style={styles.userEmail}>{userEmail || 'Not signed in'}</Text>
         </View>
 
         {/* Appearance Section */}

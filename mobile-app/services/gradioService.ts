@@ -15,6 +15,7 @@
 
 const SPACE_URL = "https://ayushi18270-explain-like-my-teacher.hf.space";
 const MINDMAP_SPACE_URL = "https://ayushi18270-teach-like-my-teacher.hf.space";
+const DEMO_SPACE_URL = "https://ayushi18270-demo.hf.space";
 const API_PREFIX = "/gradio_api";
 
 /**
@@ -59,6 +60,11 @@ async function uploadFile(
   return uploadedPath;
 }
 
+export interface TeacherResponse {
+  text: string;
+  audioUrl: string | null; // Full URL to the server-generated audio file
+}
+
 /**
  * Read the /queue/data SSE stream using XMLHttpRequest.
  *
@@ -71,13 +77,13 @@ async function uploadFile(
 function readQueueStream(
   url: string,
   targetEventId: string
-): Promise<string> {
+): Promise<TeacherResponse> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("GET", url, true);
     xhr.setRequestHeader("Accept", "text/event-stream");
 
-    let resultData: string | null = null;
+    let resultData: TeacherResponse | null = null;
     let lastProcessedIndex = 0;
 
     const parseChunk = (text: string) => {
@@ -97,21 +103,49 @@ function readQueueStream(
 
           if (msg.msg === "process_completed") {
             if (msg.success === false) {
+              console.error("Server process_completed with failure:", JSON.stringify(msg.output || msg).substring(0, 1000));
               const errorMsg =
                 msg.output?.error ||
+                (typeof msg.output === 'string' ? msg.output : null) ||
                 "Processing failed on the server. The file may be too large or in an unsupported format.";
               reject(new Error(errorMsg));
               xhr.abort();
               return;
             }
 
-            // Successful result: output.data is [teacher_answer, audio_path]
+            // Successful result: output.data is [teacher_answer, audio_file_data]
             if (
               msg.output?.data &&
               Array.isArray(msg.output.data) &&
               msg.output.data.length > 0
             ) {
-              resultData = msg.output.data[0] as string;
+              const teacherText = msg.output.data[0] as string;
+
+              // data[1] is the audio - it can be a FileData object {path, url} or a plain string path
+              let audioUrl: string | null = null;
+              const rawAudio = msg.output.data[1];
+              if (rawAudio) {
+                if (typeof rawAudio === "string") {
+                  // Plain path like "/tmp/gradio/.../audio.mp3"
+                  audioUrl = rawAudio.startsWith("http")
+                    ? rawAudio
+                    : `${SPACE_URL}/gradio_api/file=${rawAudio}`;
+                } else if (typeof rawAudio === "object" && rawAudio !== null) {
+                  // FileData object: { url, path, orig_name, ... }
+                  if (rawAudio.url) {
+                    audioUrl = rawAudio.url.startsWith("http")
+                      ? rawAudio.url
+                      : `${SPACE_URL}${rawAudio.url}`;
+                  } else if (rawAudio.path) {
+                    audioUrl = `${SPACE_URL}/gradio_api/file=${rawAudio.path}`;
+                  }
+                }
+              }
+
+              console.log("Teacher text:", teacherText.substring(0, 80) + "...");
+              console.log("Audio URL from server:", audioUrl);
+
+              resultData = { text: teacherText, audioUrl };
               resolve(resultData);
               xhr.abort();
               return;
@@ -173,20 +207,124 @@ function readQueueStream(
 }
 
 /**
+ * Send an OTP to the teacher's email via the /send_demo_otp endpoint.
+ *
+ * Uses the Gradio /call/ two-step SSE pattern:
+ *   1. POST /gradio_api/call/send_demo_otp  → { event_id }
+ *   2. GET  /gradio_api/call/send_demo_otp/{event_id}  → SSE with result
+ */
+export async function sendOtp(teacherEmail: string): Promise<string> {
+  const callResponse = await fetch(
+    `${SPACE_URL}${API_PREFIX}/call/send_demo_otp`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: [teacherEmail] }),
+    }
+  );
+
+  if (!callResponse.ok) {
+    const errText = await callResponse.text();
+    throw new Error(`Failed to send OTP (${callResponse.status}): ${errText}`);
+  }
+
+  const callResult = await callResponse.json();
+  const eventId = callResult.event_id;
+
+  if (!eventId) {
+    throw new Error("No event_id returned from OTP service");
+  }
+
+  return new Promise<string>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "GET",
+      `${SPACE_URL}${API_PREFIX}/call/send_demo_otp/${eventId}`,
+      true
+    );
+    xhr.setRequestHeader("Accept", "text/event-stream");
+
+    let lastIndex = 0;
+    let resolved = false;
+
+    const parseChunk = (text: string) => {
+      const lines = text.split("\n");
+      let currentEvent = "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("event:")) {
+          currentEvent = trimmed.substring(6).trim();
+        } else if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.substring(5).trim();
+          if (!jsonStr) continue;
+
+          if (currentEvent === "error") {
+            resolved = true;
+            reject(new Error("Failed to send OTP. Please check the email and try again."));
+            xhr.abort();
+            return;
+          }
+
+          if (currentEvent === "complete") {
+            try {
+              const parsed = JSON.parse(jsonStr);
+              const status = Array.isArray(parsed) ? parsed[0] : parsed;
+              resolved = true;
+              resolve(String(status));
+              xhr.abort();
+              return;
+            } catch (e) {
+              console.warn("Failed to parse OTP result:", e);
+            }
+          }
+        }
+      }
+    };
+
+    xhr.onprogress = () => {
+      const newText = xhr.responseText.substring(lastIndex);
+      lastIndex = xhr.responseText.length;
+      parseChunk(newText);
+    };
+
+    xhr.onload = () => {
+      if (resolved) return;
+      const remaining = xhr.responseText.substring(lastIndex);
+      if (remaining) parseChunk(remaining);
+      if (!resolved) {
+        reject(new Error("No response from OTP service. Please try again."));
+      }
+    };
+
+    xhr.onerror = () => reject(new Error("Network error sending OTP"));
+    xhr.ontimeout = () => reject(new Error("OTP request timed out"));
+    xhr.timeout = 30000;
+    xhr.send();
+  });
+}
+
+/**
  * Call the run_pipeline endpoint on the Gradio space.
  *
- * Uses the /queue/join + /queue/data pattern:
+ * Uses the /call/ two-step SSE pattern:
  *   1. POST /gradio_api/upload             → upload file
- *   2. POST /gradio_api/queue/join         → submit job, get event_id
- *   3. GET  /gradio_api/queue/data         → SSE stream with result
+ *   2. POST /gradio_api/call/run_pipeline  → submit job, get event_id
+ *   3. GET  /gradio_api/call/run_pipeline/{event_id} → SSE stream with result
+ *
+ * The endpoint requires 6 parameters:
+ *   [file, question, language, teacher_email, entered_otp, declaration]
  */
 export async function askTeacher(
   fileUri: string | null,
   fileName: string | null,
   mimeType: string | null,
   question: string,
-  language: string = "english"
-): Promise<string> {
+  language: string = "english",
+  teacherEmail: string = "",
+  enteredOtp: string = "",
+  declaration: boolean = false
+): Promise<TeacherResponse> {
   const sessionHash = Math.random().toString(36).substring(2);
 
   // --- Step 1: Upload the file ---
@@ -211,7 +349,11 @@ export async function askTeacher(
     meta: { _type: "gradio.FileData" },
   };
 
+  // Normalise language to match API enum: "english" | "hinglish"
+  const normalizedLang = language.toLowerCase().includes("hindi") ? "hinglish" : "english";
+
   console.log("Starting Gradio request with session:", sessionHash);
+  console.log("Language:", normalizedLang, "| Question:", question.substring(0, 60));
 
   // --- Step 2: Submit job via /queue/join ---
   const joinResponse = await fetch(
@@ -222,8 +364,8 @@ export async function askTeacher(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        data: [filePayload, question, language],
-        fn_index: 2,
+        data: [filePayload, question, normalizedLang, teacherEmail, enteredOtp, declaration],
+        fn_index: 1,
         session_hash: sessionHash,
       }),
     }
@@ -232,7 +374,7 @@ export async function askTeacher(
   if (!joinResponse.ok) {
     const errorText = await joinResponse.text();
     console.error("Gradio /queue/join error:", errorText);
-    throw new Error(`AI request failed (${joinResponse.status})`);
+    throw new Error(`AI request failed (${joinResponse.status}): ${errorText}`);
   }
 
   const joinResult = await joinResponse.json();
@@ -245,12 +387,10 @@ export async function askTeacher(
   console.log("Gradio job queued, event_id:", eventId);
 
   // --- Step 3: Listen for result via /queue/data SSE ---
-  const answer = await readQueueStream(
+  return readQueueStream(
     `${SPACE_URL}${API_PREFIX}/queue/data?session_hash=${sessionHash}`,
     eventId
   );
-
-  return answer;
 }
 
 /**
@@ -291,7 +431,7 @@ export async function generateMindmap(
   const callResponse = await fetch(`${MINDMAP_SPACE_URL}${API_PREFIX}/call/process`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data: [filePayload] }),
+    body: JSON.stringify({ data: [filePayload, "Mindmap"] }),
   });
 
   if (!callResponse.ok) {
@@ -393,6 +533,279 @@ export async function generateMindmap(
       reject(new Error("Mindmap request timed out (2 min limit)"));
 
     xhr.timeout = 120000;
+    xhr.send();
+  });
+}
+
+/**
+ * Generate a quiz from an uploaded image/PDF using the unified demo space.
+ *
+ * Uses /call/process with mode="Quiz".
+ * The endpoint accepts: [FileData, mode: "Mindmap" | "Quiz"]
+ * Returns: parsed quiz JSON (structure depends on the model output).
+ */
+export async function generateQuiz(
+  fileUri: string,
+  fileName: string,
+  mimeType: string
+): Promise<any> {
+  const sessionHash = Math.random().toString(36).substring(2);
+
+  // --- Step 1: Upload the file to the MINDMAP space (which also supports Quiz mode) ---
+  let uploadedPath: string;
+  try {
+    uploadedPath = await uploadFile(fileUri, fileName, mimeType, sessionHash, MINDMAP_SPACE_URL);
+  } catch (e: any) {
+    throw new Error(
+      `Upload failed: ${e.message || "Please check your internet connection."}`
+    );
+  }
+
+  const filePayload = {
+    path: uploadedPath,
+    orig_name: fileName,
+    meta: { _type: "gradio.FileData" },
+  };
+
+  console.log("Starting quiz generation for:", fileName);
+
+  // --- Step 2: POST /gradio_api/call/process with mode="Quiz" ---
+  const callResponse = await fetch(`${MINDMAP_SPACE_URL}${API_PREFIX}/call/process`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: [filePayload, "Quiz"] }),
+  });
+
+  if (!callResponse.ok) {
+    const errText = await callResponse.text();
+    throw new Error(
+      `Quiz request failed (${callResponse.status}): ${errText}`
+    );
+  }
+
+  const callResult = await callResponse.json();
+  const eventId = callResult.event_id;
+
+  if (!eventId) {
+    throw new Error("No event_id returned from quiz service");
+  }
+
+  console.log("Quiz job queued, event_id:", eventId);
+
+  // --- Step 3: Stream from /gradio_api/call/process/{event_id} ---
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "GET",
+      `${MINDMAP_SPACE_URL}${API_PREFIX}/call/process/${eventId}`,
+      true
+    );
+    xhr.setRequestHeader("Accept", "text/event-stream");
+
+    let lastIndex = 0;
+    let resolved = false;
+
+    const parseChunk = (text: string) => {
+      const lines = text.split("\n");
+      let currentEvent = "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("event:")) {
+          currentEvent = trimmed.substring(6).trim();
+        } else if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.substring(5).trim();
+          if (!jsonStr) continue;
+
+          if (currentEvent === "error") {
+            resolved = true;
+            reject(new Error("Quiz generation failed on the server. Please try a clearer image."));
+            xhr.abort();
+            return;
+          }
+
+          if (currentEvent === "complete") {
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                resolved = true;
+                resolve(parsed[0]);
+                xhr.abort();
+                return;
+              }
+            } catch (e) {
+              console.warn("Failed to parse quiz result JSON:", e);
+            }
+          }
+        }
+      }
+    };
+
+    xhr.onprogress = () => {
+      const newText = xhr.responseText.substring(lastIndex);
+      lastIndex = xhr.responseText.length;
+      parseChunk(newText);
+    };
+
+    xhr.onload = () => {
+      if (resolved) return;
+      const remaining = xhr.responseText.substring(lastIndex);
+      if (remaining) parseChunk(remaining);
+      if (!resolved) {
+        console.warn(
+          "Full quiz response:",
+          xhr.responseText.substring(0, 2000)
+        );
+        reject(
+          new Error(
+            "No quiz data in response. The model may still be loading — please try again."
+          )
+        );
+      }
+    };
+
+    xhr.onerror = () =>
+      reject(new Error("Network error connecting to quiz service"));
+    xhr.ontimeout = () =>
+      reject(new Error("Quiz request timed out (3 min limit)"));
+
+    xhr.timeout = 180000; // 3 minute timeout for quiz generation
+    xhr.send();
+  });
+}
+
+/**
+ * Generate PBL (Project-Based Learning) scenarios from an uploaded image/PDF.
+ *
+ * Uses /call/process with mode="PBL" on the teach-like-my-teacher space.
+ * Returns: array of { title, problem, questions[] }
+ */
+export async function generatePBL(
+  fileUri: string,
+  fileName: string,
+  mimeType: string
+): Promise<any> {
+  const sessionHash = Math.random().toString(36).substring(2);
+
+  // --- Step 1: Upload the file ---
+  let uploadedPath: string;
+  try {
+    uploadedPath = await uploadFile(fileUri, fileName, mimeType, sessionHash, MINDMAP_SPACE_URL);
+  } catch (e: any) {
+    throw new Error(
+      `Upload failed: ${e.message || "Please check your internet connection."}`
+    );
+  }
+
+  const filePayload = {
+    path: uploadedPath,
+    orig_name: fileName,
+    meta: { _type: "gradio.FileData" },
+  };
+
+  console.log("Starting PBL generation for:", fileName);
+
+  // --- Step 2: POST /gradio_api/call/process with mode="PBL" ---
+  const callResponse = await fetch(`${MINDMAP_SPACE_URL}${API_PREFIX}/call/process`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: [filePayload, "PBL"] }),
+  });
+
+  if (!callResponse.ok) {
+    const errText = await callResponse.text();
+    throw new Error(
+      `PBL request failed (${callResponse.status}): ${errText}`
+    );
+  }
+
+  const callResult = await callResponse.json();
+  const eventId = callResult.event_id;
+
+  if (!eventId) {
+    throw new Error("No event_id returned from PBL service");
+  }
+
+  console.log("PBL job queued, event_id:", eventId);
+
+  // --- Step 3: Stream from /gradio_api/call/process/{event_id} ---
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "GET",
+      `${MINDMAP_SPACE_URL}${API_PREFIX}/call/process/${eventId}`,
+      true
+    );
+    xhr.setRequestHeader("Accept", "text/event-stream");
+
+    let lastIndex = 0;
+    let resolved = false;
+
+    const parseChunk = (text: string) => {
+      const lines = text.split("\n");
+      let currentEvent = "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("event:")) {
+          currentEvent = trimmed.substring(6).trim();
+        } else if (trimmed.startsWith("data:")) {
+          const jsonStr = trimmed.substring(5).trim();
+          if (!jsonStr) continue;
+
+          if (currentEvent === "error") {
+            resolved = true;
+            reject(new Error("PBL generation failed on the server. Please try a clearer image."));
+            xhr.abort();
+            return;
+          }
+
+          if (currentEvent === "complete") {
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                resolved = true;
+                resolve(parsed[0]);
+                xhr.abort();
+                return;
+              }
+            } catch (e) {
+              console.warn("Failed to parse PBL result JSON:", e);
+            }
+          }
+        }
+      }
+    };
+
+    xhr.onprogress = () => {
+      const newText = xhr.responseText.substring(lastIndex);
+      lastIndex = xhr.responseText.length;
+      parseChunk(newText);
+    };
+
+    xhr.onload = () => {
+      if (resolved) return;
+      const remaining = xhr.responseText.substring(lastIndex);
+      if (remaining) parseChunk(remaining);
+      if (!resolved) {
+        console.warn(
+          "Full PBL response:",
+          xhr.responseText.substring(0, 2000)
+        );
+        reject(
+          new Error(
+            "No PBL data in response. The model may still be loading — please try again."
+          )
+        );
+      }
+    };
+
+    xhr.onerror = () =>
+      reject(new Error("Network error connecting to PBL service"));
+    xhr.ontimeout = () =>
+      reject(new Error("PBL request timed out (3 min limit)"));
+
+    xhr.timeout = 180000;
     xhr.send();
   });
 }

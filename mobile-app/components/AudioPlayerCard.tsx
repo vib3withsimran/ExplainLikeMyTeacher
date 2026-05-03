@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, Pressable, Platform } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { Fonts, Spacing, Radii, useTheme } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -7,24 +8,22 @@ import { useSettings } from '@/context/SettingsContext';
 
 interface AudioPlayerCardProps {
   text: string;
+  audioUrl: string | null;
   messageId: string;
 }
 
-// Estimate speech duration based on word count and rate
-// Average English speech: ~150 words per minute at 1x
+// Estimate speech duration for the expo-speech fallback
 function estimateDuration(text: string, rate: number): number {
   const wordCount = text.split(/\s+/).length;
   const wordsPerSecond = (150 * rate) / 60;
   return Math.max(wordCount / wordsPerSecond, 1);
 }
 
-// Generate random waveform bar heights for visual effect
+// Generate a stable waveform pattern per instance
 function generateWaveform(count: number): number[] {
   const bars: number[] = [];
   for (let i = 0; i < count; i++) {
-    // Create a natural-looking waveform pattern
     const base = 0.3 + Math.random() * 0.7;
-    // Add some clustering for a more organic look
     const clustered = Math.sin(i * 0.4) * 0.3 + base;
     bars.push(Math.max(0.15, Math.min(1, clustered)));
   }
@@ -33,39 +32,27 @@ function generateWaveform(count: number): number[] {
 
 const BAR_COUNT = 32;
 
-export default function AudioPlayerCard({ text, messageId }: AudioPlayerCardProps) {
+export default function AudioPlayerCard({ text, audioUrl, messageId }: AudioPlayerCardProps) {
   const Colors = useTheme();
   const { voiceSettings } = useSettings();
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0); // 0 to 1
-  const [elapsed, setElapsed] = useState(0);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const waveformRef = useRef<number[]>(generateWaveform(BAR_COUNT));
 
-  const totalDuration = estimateDuration(text, voiceSettings.playbackSpeed);
+  // ── expo-audio (server URL path) ──────────────────────────────
+  // useAudioPlayer accepts null to start with no source.
+  // The source is set once and won't change per message card.
+  const player = useAudioPlayer(audioUrl ? { uri: audioUrl } : null);
+  const status = useAudioPlayerStatus(player);
 
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
+  // Derived from expo-audio status when audioUrl exists
+  const serverDuration = status.duration ?? 0;
+  const serverElapsed = status.currentTime ?? 0;
+  const serverPlaying = status.playing;
 
-  const startTimer = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => {
-      setElapsed(prev => {
-        const next = prev + 0.1;
-        const newProgress = Math.min(next / totalDuration, 1);
-        setProgress(newProgress);
-        if (newProgress >= 1) {
-          if (timerRef.current) clearInterval(timerRef.current);
-          setIsPlaying(false);
-          return 0;
-        }
-        return next;
-      });
-    }, 100);
-  }, [totalDuration]);
+  // ── expo-speech fallback (no server audio) ────────────────────
+  const [speechPlaying, setSpeechPlaying] = useState(false);
+  const [speechElapsed, setSpeechElapsed] = useState(0);
+  const estimatedDuration = estimateDuration(text, voiceSettings.playbackSpeed);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
@@ -74,93 +61,122 @@ export default function AudioPlayerCard({ text, messageId }: AudioPlayerCardProp
     }
   }, []);
 
-  const handlePlay = async () => {
+  const startTimer = useCallback(() => {
+    stopTimer();
+    timerRef.current = setInterval(() => {
+      setSpeechElapsed(prev => {
+        const next = prev + 0.1;
+        if (next >= estimatedDuration) {
+          stopTimer();
+          setSpeechPlaying(false);
+          return estimatedDuration;
+        }
+        return next;
+      });
+    }, 100);
+  }, [estimatedDuration, stopTimer]);
+
+  const playViaSpeech = useCallback(
+    (fromStart = true) => {
+      if (fromStart) setSpeechElapsed(0);
+
+      setSpeechPlaying(true);
+      startTimer();
+
+      const wordsArr = text.split(/\s+/);
+      const startIdx = fromStart
+        ? 0
+        : Math.floor((speechElapsed / estimatedDuration) * wordsArr.length);
+      const spokenText = wordsArr.slice(startIdx).join(' ');
+
+      Speech.speak(spokenText, {
+        language: voiceSettings.outputLanguage,
+        rate: voiceSettings.playbackSpeed,
+        onDone: () => { stopTimer(); setSpeechPlaying(false); setSpeechElapsed(estimatedDuration); },
+        onStopped: () => { stopTimer(); setSpeechPlaying(false); },
+        onError: () => { stopTimer(); setSpeechPlaying(false); },
+      });
+    },
+    [text, voiceSettings, estimatedDuration, speechElapsed, startTimer, stopTimer]
+  );
+
+  // ── Unified computed state ────────────────────────────────────
+  const isPlaying = audioUrl ? serverPlaying : speechPlaying;
+  const elapsed   = audioUrl ? serverElapsed : speechElapsed;
+  const duration  = audioUrl
+    ? (serverDuration > 0 ? serverDuration : estimateDuration(text, 1))
+    : estimatedDuration;
+  const progress  = duration > 0 ? Math.min(elapsed / duration, 1) : 0;
+
+  // ── Audio mode setup ──────────────────────────────────────────
+  useEffect(() => {
+    if (audioUrl) {
+      setAudioModeAsync({ playsInSilentMode: true }).catch(() => {});
+    }
+  }, [audioUrl]);
+
+  // ── Play / Pause handler ──────────────────────────────────────
+  const handlePlay = () => {
     if (!voiceSettings.audioEnabled) return;
 
-    if (isPlaying) {
-      // Stop
-      await Speech.stop();
-      stopTimer();
-      setIsPlaying(false);
-      return;
-    }
-
-    // Reset if finished
-    if (progress >= 1) {
-      setProgress(0);
-      setElapsed(0);
-    }
-
-    setIsPlaying(true);
-    startTimer();
-
-    Speech.speak(text, {
-      language: voiceSettings.outputLanguage,
-      rate: voiceSettings.playbackSpeed,
-      onDone: () => {
+    if (audioUrl) {
+      // expo-audio path — status.playing is always the source of truth
+      if (serverPlaying) {
+        player.pause();
+      } else {
+        // If the track has finished, restart from the beginning
+        if (serverDuration > 0 && serverElapsed >= serverDuration - 0.2) {
+          player.seekTo(0);
+        }
+        player.play();
+      }
+    } else {
+      // expo-speech fallback
+      if (speechPlaying) {
+        Speech.stop();
         stopTimer();
-        setIsPlaying(false);
-        setProgress(1);
-        setElapsed(totalDuration);
-      },
-      onStopped: () => {
-        stopTimer();
-        setIsPlaying(false);
-      },
-      onError: () => {
-        stopTimer();
-        setIsPlaying(false);
-      },
-    });
-  };
-
-  const handleSeek = (barIndex: number) => {
-    const seekProgress = barIndex / BAR_COUNT;
-    const seekTime = seekProgress * totalDuration;
-    setProgress(seekProgress);
-    setElapsed(seekTime);
-
-    // Restart speech from approximate position
-    // (expo-speech doesn't support seeking, so we restart from a word offset)
-    if (isPlaying) {
-      Speech.stop();
-      stopTimer();
-
-      const words = text.split(/\s+/);
-      const startWordIndex = Math.floor(seekProgress * words.length);
-      const remainingText = words.slice(startWordIndex).join(' ');
-
-      if (remainingText.trim()) {
-        startTimer();
-        Speech.speak(remainingText, {
-          language: voiceSettings.outputLanguage,
-          rate: voiceSettings.playbackSpeed,
-          onDone: () => {
-            stopTimer();
-            setIsPlaying(false);
-            setProgress(1);
-            setElapsed(totalDuration);
-          },
-          onStopped: () => {
-            stopTimer();
-            setIsPlaying(false);
-          },
-          onError: () => {
-            stopTimer();
-            setIsPlaying(false);
-          },
-        });
+        setSpeechPlaying(false);
+      } else {
+        const isFinished = speechElapsed >= estimatedDuration - 0.1;
+        if (isFinished) setSpeechElapsed(0);
+        playViaSpeech(isFinished);
       }
     }
   };
 
-  // Cleanup on unmount
+  // ── Seek handler ──────────────────────────────────────────────
+  const handleSeek = (barIndex: number) => {
+    const seekFraction = barIndex / BAR_COUNT;
+
+    if (audioUrl) {
+      const seekSec = seekFraction * (serverDuration > 0 ? serverDuration : 0);
+      player.seekTo(seekSec);
+    } else {
+      const seekSec = seekFraction * estimatedDuration;
+      setSpeechElapsed(seekSec);
+
+      if (speechPlaying) {
+        Speech.stop();
+        stopTimer();
+        playViaSpeech(false);
+      }
+    }
+  };
+
+  // ── Cleanup on unmount ────────────────────────────────────────
   useEffect(() => {
     return () => {
       stopTimer();
-      Speech.stop();
+      Speech.stop().catch(() => {});
     };
   }, [stopTimer]);
+
+  const formatTime = (seconds: number): string => {
+    const s = Math.max(0, seconds);
+    const mins = Math.floor(s / 60);
+    const secs = Math.floor(s % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const activeBarIndex = Math.floor(progress * BAR_COUNT);
 
@@ -233,9 +249,8 @@ export default function AudioPlayerCard({ text, messageId }: AudioPlayerCardProp
       <Pressable
         style={styles.waveformContainer}
         onPress={(e) => {
-          // Calculate which bar was tapped
           const { locationX } = e.nativeEvent;
-          const containerWidth = BAR_COUNT * 5; // approx width (3px bar + 2px gap)
+          const containerWidth = BAR_COUNT * 5; // 3px bar + 2px gap
           const tappedBar = Math.floor((locationX / containerWidth) * BAR_COUNT);
           handleSeek(Math.max(0, Math.min(BAR_COUNT - 1, tappedBar)));
         }}
@@ -247,9 +262,8 @@ export default function AudioPlayerCard({ text, messageId }: AudioPlayerCardProp
               styles.bar,
               {
                 height: height * 28 + 4,
-                backgroundColor: index <= activeBarIndex
-                  ? Colors.primary
-                  : Colors.outline_variant,
+                backgroundColor:
+                  index <= activeBarIndex ? Colors.primary : Colors.outline_variant,
               },
             ]}
           />
@@ -257,9 +271,7 @@ export default function AudioPlayerCard({ text, messageId }: AudioPlayerCardProp
       </Pressable>
 
       <Text style={styles.timeText}>
-        {isPlaying || elapsed > 0
-          ? formatTime(elapsed)
-          : formatTime(totalDuration)}
+        {formatTime(elapsed > 0 || isPlaying ? elapsed : duration)}
       </Text>
     </View>
   );
