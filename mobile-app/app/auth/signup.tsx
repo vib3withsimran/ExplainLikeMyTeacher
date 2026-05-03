@@ -56,7 +56,7 @@ export default function SignupScreen() {
     }
   };
 
-  // ── Google OAuth ──
+  // ── Google OAuth (PKCE flow) ──
   const handleGoogleSignup = async () => {
     if (IS_EXPO_GO) {
       Alert.alert(
@@ -84,24 +84,39 @@ export default function SignupScreen() {
 
       if (result.type === 'success' && result.url) {
         console.log('[Google OAuth] callback URL:', result.url);
-        const hashParams = new URLSearchParams(
-          result.url.includes('#') ? result.url.split('#')[1] : result.url.split('?')[1] ?? ''
-        );
-        const accessToken = hashParams.get('access_token');
-        const refreshToken = hashParams.get('refresh_token');
 
-        if (accessToken && refreshToken) {
-          const { error: setErr } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-          });
-          if (setErr) throw setErr;
+        const url = new URL(result.url);
+        const code = url.searchParams.get('code');
+
+        if (code) {
+          const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(code);
+          if (exchangeErr) throw exchangeErr;
           router.replace('/(drawer)');
         } else {
-          const { data: sess } = await supabase.auth.getSession();
-          if (sess.session) router.replace('/(drawer)');
-          else throw new Error('No tokens received. Check Supabase redirect URL settings.');
+          // Fallback: try parsing tokens from hash (implicit flow compat)
+          const hashParams = new URLSearchParams(
+            result.url.includes('#') ? result.url.split('#')[1] : ''
+          );
+          const accessToken = hashParams.get('access_token');
+          const refreshToken = hashParams.get('refresh_token');
+
+          if (accessToken && refreshToken) {
+            const { error: setErr } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            if (setErr) throw setErr;
+            router.replace('/(drawer)');
+          } else {
+            throw new Error(
+              'No auth code or tokens received. Please check:\n' +
+              '1. Supabase → URL Configuration → Redirect URLs has: ' + redirectTo + '\n' +
+              '2. Google Cloud Console → OAuth credentials has: https://oqszcpqiiyjmxegbybqu.supabase.co/auth/v1/callback'
+            );
+          }
         }
+      } else if (result.type === 'cancel') {
+        // User dismissed — do nothing
       }
     } catch (err: any) {
       console.error('[Google OAuth] error:', err.message);

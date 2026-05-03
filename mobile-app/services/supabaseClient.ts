@@ -11,7 +11,10 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
-    // flowType: 'pkce' removed — WebCrypto (SHA-256) is unavailable in React Native
-    // Using implicit flow instead, which works in Expo Go
+    flowType: 'pkce',
+    // Note: WebCrypto warning ("will default to plain") is harmless.
+    // PKCE with 'plain' method works correctly — the key advantage is
+    // tokens come as ?code= query params (preserved on Android)
+    // instead of #access_token= hash fragments (stripped on Android).
   },
 });

@@ -43,7 +43,7 @@ export default function LoginScreen() {
     }
   };
 
-  // ── Google OAuth ──
+  // ── Google OAuth (PKCE flow) ──
   const handleGoogleLogin = async () => {
     if (IS_EXPO_GO) {
       Alert.alert(
@@ -55,11 +55,8 @@ export default function LoginScreen() {
     }
     setGoogleLoading(true);
     try {
-      // Linking.createURL is the correct way in Expo Router:
-      //   Expo Go  → exp://192.168.x.x:8081/--/auth/callback
-      //   Standalone → explainlikemyteacher://auth/callback
       const redirectTo = Linking.createURL('auth/callback');
-      console.log('[Google OAuth] redirectTo:', redirectTo); // ← CHECK THIS IN TERMINAL
+      console.log('[Google OAuth] redirectTo:', redirectTo);
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
@@ -74,33 +71,42 @@ export default function LoginScreen() {
 
       if (result.type === 'success' && result.url) {
         console.log('[Google OAuth] callback URL:', result.url);
-        // Implicit flow: tokens are in the URL hash  #access_token=...&refresh_token=...
-        const hashParams = new URLSearchParams(
-          result.url.includes('#') ? result.url.split('#')[1] : result.url.split('?')[1] ?? ''
-        );
-        const accessToken = hashParams.get('access_token');
-        const refreshToken = hashParams.get('refresh_token');
 
-        if (accessToken && refreshToken) {
-          const { error: setErr } = await supabase.auth.setSession({
-            access_token: accessToken,
-            refresh_token: refreshToken,
-          });
-          if (setErr) throw setErr;
+        // PKCE flow: Supabase sends back ?code=... as a query param.
+        // extractCodeFromUrl + exchange it for a session:
+        const url = new URL(result.url);
+        const code = url.searchParams.get('code');
+
+        if (code) {
+          // exchangeCodeForSession takes just the code string
+          const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(code);
+          if (exchangeErr) throw exchangeErr;
           router.replace('/(drawer)');
         } else {
-          // Check if Supabase already set the session internally
-          const { data: sess } = await supabase.auth.getSession();
-          if (sess.session) {
+          // Fallback: try parsing tokens from hash (implicit flow compat)
+          const hashParams = new URLSearchParams(
+            result.url.includes('#') ? result.url.split('#')[1] : ''
+          );
+          const accessToken = hashParams.get('access_token');
+          const refreshToken = hashParams.get('refresh_token');
+
+          if (accessToken && refreshToken) {
+            const { error: setErr } = await supabase.auth.setSession({
+              access_token: accessToken,
+              refresh_token: refreshToken,
+            });
+            if (setErr) throw setErr;
             router.replace('/(drawer)');
           } else {
-            throw new Error('No tokens received. Check Supabase redirect URL settings.');
+            throw new Error(
+              'No auth code or tokens received. Please check:\n' +
+              '1. Supabase → URL Configuration → Redirect URLs has: ' + redirectTo + '\n' +
+              '2. Google Cloud Console → OAuth credentials has: https://oqszcpqiiyjmxegbybqu.supabase.co/auth/v1/callback'
+            );
           }
         }
       } else if (result.type === 'cancel') {
         // User dismissed — do nothing
-      } else {
-        console.warn('[Google OAuth] unexpected result:', JSON.stringify(result));
       }
     } catch (err: any) {
       console.error('[Google OAuth] error:', err.message);

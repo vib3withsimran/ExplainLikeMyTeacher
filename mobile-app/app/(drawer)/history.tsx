@@ -1,11 +1,11 @@
-import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Platform } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Fonts, Spacing, Radii, useTheme } from '@/constants/theme';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import Header from '@/components/Header';
-import { useState, useEffect, useCallback } from 'react';
-import { getChatHistory, ChatSession } from '@/services/dbService';
-import { useFocusEffect } from 'expo-router';
+import { useState, useCallback } from 'react';
+import { getChatHistory, deleteChatSession, ChatSession } from '@/services/dbService';
+import { useFocusEffect, router } from 'expo-router';
 
 // ── Helpers ──────────────────────────────────────────────────────
 function formatDate(isoString: string): string {
@@ -38,7 +38,6 @@ export default function HistoryScreen() {
   const Colors = useTheme();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
@@ -51,6 +50,39 @@ export default function HistoryScreen() {
   useFocusEffect(useCallback(() => {
     loadHistory();
   }, [loadHistory]));
+
+  const handleDelete = (session: ChatSession, e: any) => {
+    e.stopPropagation?.();
+    Alert.alert(
+      'Delete Session',
+      `Delete this session and all ${session.interactions?.length ?? 0} messages? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteChatSession(session.id, session.file_id);
+              setSessions(prev => prev.filter(s => s.id !== session.id));
+            } catch (err: any) {
+              Alert.alert('Delete Failed', err.message || 'Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleOpenSession = (session: ChatSession) => {
+    router.push({
+      pathname: '/(drawer)/chat',
+      params: {
+        sessionId: session.id,
+        sessionFileName: session.lecture_files?.file_name ?? 'Previous session',
+      },
+    });
+  };
 
   const s = makeStyles(Colors);
 
@@ -86,17 +118,17 @@ export default function HistoryScreen() {
           <Text style={s.sectionTitle}>{sessions.length} session{sessions.length !== 1 ? 's' : ''}</Text>
 
           {sessions.map((session) => {
-            const isExpanded = expandedId === session.id;
             const msgCount = session.interactions?.length ?? 0;
-            const userMsgs = session.interactions?.filter(m => m.role === 'user') ?? [];
+            const firstUserMsg = session.interactions?.find(m => m.role === 'user');
+            const previewText = firstUserMsg?.content?.substring(0, 80) || 'No messages yet';
 
             return (
-              <View key={session.id} style={s.card}>
-                {/* Card header — tap to expand */}
-                <Pressable
-                  style={s.cardHeader}
-                  onPress={() => setExpandedId(isExpanded ? null : session.id)}
-                >
+              <Pressable
+                key={session.id}
+                style={({ pressed }) => [s.card, { opacity: pressed ? 0.85 : 1 }]}
+                onPress={() => handleOpenSession(session)}
+              >
+                <View style={s.cardHeader}>
                   <View style={s.iconBox}>
                     <IconSymbol
                       name={getFileIcon(session.lecture_files?.mime_type ?? null) as any}
@@ -108,6 +140,9 @@ export default function HistoryScreen() {
                     <Text style={s.fileName} numberOfLines={1}>
                       {session.lecture_files?.file_name ?? 'Unknown file'}
                     </Text>
+                    <Text style={s.previewText} numberOfLines={2}>
+                      {previewText}{previewText.length >= 80 ? '…' : ''}
+                    </Text>
                     <Text style={s.metaRow}>
                       {formatDate(session.started_at)} · {msgCount} message{msgCount !== 1 ? 's' : ''} · {session.language}
                     </Text>
@@ -117,40 +152,19 @@ export default function HistoryScreen() {
                       </Text>
                     ) : null}
                   </View>
-                  <IconSymbol
-                    name={isExpanded ? 'chevron.up' : 'chevron.down'}
-                    size={16}
-                    color={Colors.outline}
-                  />
-                </Pressable>
 
-                {/* Expandable message thread */}
-                {isExpanded && (
-                  <View style={s.thread}>
-                    <View style={s.threadDivider} />
-                    {session.interactions?.length === 0 ? (
-                      <Text style={s.noMessages}>No messages in this session.</Text>
-                    ) : (
-                      session.interactions.map((msg) => (
-                        <View
-                          key={msg.id}
-                          style={[s.bubble, msg.role === 'user' ? s.userBubble : s.aiBubble]}
-                        >
-                          <Text style={s.bubbleRole}>
-                            {msg.role === 'user' ? '🧑 You' : '🎓 Teacher AI'}
-                          </Text>
-                          <Text style={[s.bubbleText, msg.role === 'user' ? s.userText : s.aiText]}>
-                            {msg.content}
-                          </Text>
-                          <Text style={s.bubbleTime}>
-                            {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </Text>
-                        </View>
-                      ))
-                    )}
+                  <View style={s.cardActions}>
+                    <Pressable
+                      style={({ pressed }) => [s.deleteIconBtn, { opacity: pressed ? 0.5 : 1 }]}
+                      onPress={(e) => handleDelete(session, e)}
+                      hitSlop={12}
+                    >
+                      <IconSymbol name="trash.fill" size={18} color={Colors.error} />
+                    </Pressable>
+                    <IconSymbol name="chevron.right" size={14} color={Colors.outline} />
                   </View>
-                )}
-              </View>
+                </View>
+              </Pressable>
             );
           })}
         </ScrollView>
@@ -250,62 +264,32 @@ function makeStyles(Colors: any) {
       color: Colors.on_surface,
       marginBottom: 2,
     },
+    previewText: {
+      ...Fonts.bodyMd,
+      color: Colors.on_surface_variant,
+      marginBottom: 4,
+      lineHeight: 20,
+    },
     metaRow: {
       ...Fonts.bodySm,
-      color: Colors.on_surface_variant,
+      color: Colors.outline,
     },
     teacherEmail: {
       ...Fonts.bodySm,
       color: Colors.primary,
       marginTop: 2,
     },
-
-    // Thread
-    thread: { paddingHorizontal: Spacing.lg, paddingBottom: Spacing.lg },
-    threadDivider: {
-      height: 1,
-      backgroundColor: Colors.surface_container_highest,
-      marginBottom: Spacing.lg,
+    cardActions: {
+      alignItems: 'center',
+      gap: Spacing.md,
     },
-    noMessages: {
-      ...Fonts.bodyMd,
-      color: Colors.outline,
-      textAlign: 'center',
-      paddingVertical: Spacing.md,
-    },
-    bubble: {
-      borderRadius: Radii.lg,
-      padding: Spacing.md,
-      marginBottom: Spacing.sm,
-    },
-    userBubble: {
-      backgroundColor: Colors.primary_container,
-      alignSelf: 'flex-end',
-      maxWidth: '90%',
-    },
-    aiBubble: {
-      backgroundColor: Colors.surface_container_low,
-      alignSelf: 'flex-start',
-      maxWidth: '90%',
-      borderWidth: 1,
-      borderColor: Colors.surface_container_highest,
-    },
-    bubbleRole: {
-      ...Fonts.labelSm,
-      color: Colors.on_surface_variant,
-      marginBottom: 4,
-    },
-    bubbleText: {
-      ...Fonts.bodyMd,
-      lineHeight: 20,
-    },
-    userText: { color: Colors.on_primary_container },
-    aiText: { color: Colors.on_surface },
-    bubbleTime: {
-      ...Fonts.labelSm,
-      color: Colors.outline,
-      marginTop: 4,
-      textAlign: 'right',
+    deleteIconBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: Radii.full,
+      backgroundColor: Colors.error_container,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
   });
 }

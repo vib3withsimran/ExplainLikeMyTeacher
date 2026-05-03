@@ -6,10 +6,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useLectureContext } from '@/context/LectureContext';
 import { useSettings } from '@/context/SettingsContext';
 import { askTeacher, sendOtp as sendOtpApi, TeacherResponse } from '@/services/gradioService';
-import { saveLectureFile, createChatSession, saveMessage } from '@/services/dbService';
+import { saveLectureFile, createChatSession, saveMessage, getSessionMessages } from '@/services/dbService';
 import AudioPlayerCard from '@/components/AudioPlayerCard';
 import Header from '@/components/Header';
 import * as DocumentPicker from 'expo-document-picker';
+import { useLocalSearchParams } from 'expo-router';
 
 type MessageRole = "user" | "ai";
 
@@ -28,8 +29,10 @@ export default function ChatScreen() {
   const Colors = useTheme();
   const { currentFile, setCurrentFile, teacherEmail, setTeacherEmail, setTeacherVerified } = useLectureContext();
   const { voiceSettings } = useSettings();
+  const params = useLocalSearchParams<{ sessionId?: string; sessionFileName?: string }>();
   const [inputText, setInputText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isRestoredSession, setIsRestoredSession] = useState(false);
   const [messages, setMessages] = useState<Message[]>([{
     id: 'intro',
     role: 'ai',
@@ -51,6 +54,37 @@ export default function ChatScreen() {
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
 
   const scrollViewRef = useRef<ScrollView>(null);
+
+  // ─── Restore session from History ───
+  useEffect(() => {
+    if (params.sessionId) {
+      const restoreSession = async () => {
+        const interactions = await getSessionMessages(params.sessionId!);
+        if (interactions.length > 0) {
+          const restoredMsgs: Message[] = interactions.map((msg) => ({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            audioUrl: msg.audio_url,
+            time: new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          }));
+          // Prepend a header message showing which session this is
+          const headerMsg: Message = {
+            id: 'restored-header',
+            role: 'ai',
+            content: `📂 Restored session: ${params.sessionFileName || 'Previous session'}\n\nThis is a read-only view of your past conversation. You cannot send new messages in a restored session.`,
+            time: new Date(interactions[0].created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+          setMessages([headerMsg, ...restoredMsgs]);
+          setFormStep('done');
+          setIsRestoredSession(true);
+          // Set a dummy currentFile so showChat = true
+          setCurrentFile({ uri: '', name: params.sessionFileName || 'Restored', mimeType: '', sizeMB: '' });
+        }
+      };
+      restoreSession();
+    }
+  }, [params.sessionId]);
 
   const handleMicPress = async () => {
     Alert.alert(
@@ -166,6 +200,7 @@ export default function ChatScreen() {
     setOtpSent(false);
     setOtpValue('');
     setDbSessionId(null);
+    setIsRestoredSession(false);
     setMessages([{
       id: 'intro',
       role: 'ai',
@@ -452,6 +487,12 @@ export default function ChatScreen() {
           </ScrollView>
 
           <View style={s.inputSection}>
+            {isRestoredSession ? (
+              <Pressable style={s.newChatFloating} onPress={handleNewChat}>
+                <IconSymbol name="plus.circle.fill" size={20} color={Colors.on_primary} />
+                <Text style={s.newChatFloatingText}>Start New Chat</Text>
+              </Pressable>
+            ) : (
             <View style={s.inputContainer}>
               <TextInput
                 style={s.input}
@@ -478,6 +519,7 @@ export default function ChatScreen() {
                 </Pressable>
               )}
             </View>
+            )}
           </View>
         </KeyboardAvoidingView>
       )}
@@ -816,6 +858,21 @@ function makeStyles(Colors: any) {
       borderRadius: Radii.full,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    newChatFloating: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.sm,
+      backgroundColor: Colors.primary,
+      borderRadius: Radii.full,
+      paddingVertical: Spacing.md,
+      paddingHorizontal: Spacing.xl,
+    },
+    newChatFloatingText: {
+      ...Fonts.labelLg,
+      color: Colors.on_primary,
+      fontFamily: 'Manrope_700Bold',
     },
   });
 }

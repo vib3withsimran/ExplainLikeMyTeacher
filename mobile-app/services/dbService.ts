@@ -113,8 +113,58 @@ export async function saveMessage(
 }
 
 // ─────────────────────────────────────────────
+// Delete operations
+// ─────────────────────────────────────────────
+
+/**
+ * Delete a chat session and all its messages.
+ * Also removes the parent lecture_file if no other sessions reference it.
+ */
+export async function deleteChatSession(sessionId: string, fileId: string): Promise<void> {
+  // 1. Delete interactions (cascade should handle this, but be explicit)
+  await supabase.from('interactions').delete().eq('session_id', sessionId);
+
+  // 2. Delete the session itself
+  const { error: sessionErr } = await supabase
+    .from('chat_sessions')
+    .delete()
+    .eq('id', sessionId);
+
+  if (sessionErr) throw new Error(`Failed to delete session: ${sessionErr.message}`);
+
+  // 3. Check if the lecture file has any other sessions
+  const { data: remaining } = await supabase
+    .from('chat_sessions')
+    .select('id')
+    .eq('file_id', fileId)
+    .limit(1);
+
+  // If no other sessions use this file, delete it too
+  if (!remaining || remaining.length === 0) {
+    await supabase.from('lecture_files').delete().eq('id', fileId);
+  }
+}
+
+// ─────────────────────────────────────────────
 // Read operations (called by History screen)
 // ─────────────────────────────────────────────
+
+/**
+ * Fetch all messages for a specific session, ordered chronologically.
+ */
+export async function getSessionMessages(sessionId: string): Promise<Interaction[]> {
+  const { data, error } = await supabase
+    .from('interactions')
+    .select('id, session_id, role, content, audio_url, created_at')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.warn('Failed to fetch session messages:', error.message);
+    return [];
+  }
+  return (data as Interaction[]) ?? [];
+}
 
 /**
  * Fetch all chat sessions for the current user, newest first.
